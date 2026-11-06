@@ -18,6 +18,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout SakuraParadiseAudioProcessor
     add("heaven", "Heaven", 0.3f);
     add("shimmer", "Shimmer", 0.f);
     add("width", "Width", 0.5f);
+    add("anime", "Anime", 0.f);
     l.add(std::make_unique<P>(juce::ParameterID{ "output", 1 }, "Output", R(-24.f, 6.f, 0.1f), 0.f));
     return l;
 }
@@ -46,6 +47,9 @@ void SakuraParadiseAudioProcessor::prepareToPlay(double sampleRate, int)
     shifter.prepare();
     shifter.grain = (float) (sr * 0.06);
     shFb = 0.f;
+    for (int c = 0; c < 2; ++c) { voice[c].prepare(); voice[c].grain = (float) (sr * 0.035); animeShelf[c] = Biquad(); }
+    vibPh = 0.f;
+    vibInc = juce::MathConstants<float>::twoPi * 5.5f / (float) sr;
     env = 0.f; gate = 1.f; sibEnv = 0.f;
 
     auto coef = [this](double seconds) { return 1.f - std::exp(-1.f / (float) (seconds * sr)); };
@@ -80,6 +84,8 @@ void SakuraParadiseAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
     auto P = [this](const char* id) { return apvts.getRawParameterValue(id)->load(); };
     const float clean = P("clean"), silk = P("silk"), warmth = P("warmth"), air = P("air");
     const float choir = P("choir"), heaven = P("heaven"), shimmer = P("shimmer"), width = P("width");
+    const float anime = P("anime");
+    const float animeRatio = std::pow(2.f, anime * 7.f / 12.f);
     const float outGain = juce::Decibels::decibelsToGain(P("output"));
 
     for (int c = 0; c < 2; ++c)
@@ -88,6 +94,7 @@ void SakuraParadiseAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
         lowS[c].lowShelf(sr, 180.f, warmth * 4.f);
         highS[c].highShelf(sr, 9500.f, air * 9.f);
         sibHp[c].highPass(sr, 6500.f, 0.707f);
+        animeShelf[c].highShelf(sr, 3200.f, anime * 5.f);
     }
 
     juce::Reverb::Parameters rp;
@@ -134,6 +141,21 @@ void SakuraParadiseAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
         if (silk > 0.001f && sibEnv > 0.04f) gs = std::pow(0.04f / sibEnv, silk * 0.9f);
         l -= sl * (1.f - gs);
         r -= sr2 * (1.f - gs);
+
+        // anime voice: pitch/formant lift + light vibrato + brightness
+        vibPh += vibInc;
+        if (vibPh > twoPi) vibPh -= twoPi;
+        {
+            const float ratio = animeRatio * (1.f + 0.005f * anime * std::sin(vibPh));
+            float al = animeShelf[0].process(voice[0].process(l, ratio));
+            float ar = animeShelf[1].process(voice[1].process(r, ratio));
+            if (anime > 0.001f)
+            {
+                const float mixA = juce::jmin(1.f, anime * 20.f);
+                l = l * (1.f - mixA) + al * mixA;
+                r = r * (1.f - mixA) + ar * mixA;
+            }
+        }
 
         // warmth + air
         l = highS[0].process(lowS[0].process(l));

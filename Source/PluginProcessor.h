@@ -140,5 +140,10 @@ private:
     PitchShifter shifter;
     float shFb = 0.f;
 
+    // anime voice
+    PitchShifter voice[2];
+    Biquad animeShelf[2];
+    float vibPh = 0.f, vibInc = 0.f;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SakuraParadiseAudioProcessor)
 };
