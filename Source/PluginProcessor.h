@@ -1,59 +1,8 @@
 #pragma once
 #include <JuceHeader.h>
+#include "Tuner.h"
 
-// RBJ biquad
-struct Biquad
-{
-    float b0 = 1.f, b1 = 0.f, b2 = 0.f, a1 = 0.f, a2 = 0.f, z1 = 0.f, z2 = 0.f;
-
-    float process(float x)
-    {
-        float y = b0 * x + z1;
-        z1 = b1 * x - a1 * y + z2;
-        z2 = b2 * x - a2 * y;
-        return y;
-    }
-    void set(float nb0, float nb1, float nb2, float a0, float na1, float na2)
-    {
-        b0 = nb0 / a0; b1 = nb1 / a0; b2 = nb2 / a0; a1 = na1 / a0; a2 = na2 / a0;
-    }
-    void highPass(double sr, float f, float q)
-    {
-        float w0 = juce::MathConstants<float>::twoPi * f / (float) sr;
-        float cs = std::cos(w0), sn = std::sin(w0), al = sn / (2.f * q);
-        set((1.f + cs) * 0.5f, -(1.f + cs), (1.f + cs) * 0.5f, 1.f + al, -2.f * cs, 1.f - al);
-    }
-    void lowShelf(double sr, float f, float gainDb)
-    {
-        float A = std::pow(10.f, gainDb / 40.f);
-        float w0 = juce::MathConstants<float>::twoPi * f / (float) sr;
-        float cs = std::cos(w0), sn = std::sin(w0);
-        float al = sn * 0.5f * std::sqrt(2.f);
-        float sA = 2.f * std::sqrt(A) * al;
-        set(A * ((A + 1.f) - (A - 1.f) * cs + sA),
-            2.f * A * ((A - 1.f) - (A + 1.f) * cs),
-            A * ((A + 1.f) - (A - 1.f) * cs - sA),
-            (A + 1.f) + (A - 1.f) * cs + sA,
-            -2.f * ((A - 1.f) + (A + 1.f) * cs),
-            (A + 1.f) + (A - 1.f) * cs - sA);
-    }
-    void highShelf(double sr, float f, float gainDb)
-    {
-        float A = std::pow(10.f, gainDb / 40.f);
-        float w0 = juce::MathConstants<float>::twoPi * f / (float) sr;
-        float cs = std::cos(w0), sn = std::sin(w0);
-        float al = sn * 0.5f * std::sqrt(2.f);
-        float sA = 2.f * std::sqrt(A) * al;
-        set(A * ((A + 1.f) + (A - 1.f) * cs + sA),
-            -2.f * A * ((A - 1.f) + (A + 1.f) * cs),
-            A * ((A + 1.f) + (A - 1.f) * cs - sA),
-            (A + 1.f) - (A - 1.f) * cs + sA,
-            2.f * ((A - 1.f) - (A + 1.f) * cs),
-            (A + 1.f) - (A - 1.f) * cs - sA);
-    }
-};
-
-// Two-tap granular pitch shifter (used for the shimmer octave)
+// Simple two-tap granular pitch shifter
 struct PitchShifter
 {
     static constexpr int size = 16384;
@@ -71,7 +20,7 @@ struct PitchShifter
         int i0 = (int) rp;
         float fr = rp - (float) i0;
         int i1 = (i0 + 1) % size;
-        return buf[(size_t) (i0 % size)] * (1.f - fr) + buf[(size_t) i1] * fr;
+        return buf[(size_t) i0 % size] * (1.f - fr) + buf[(size_t) i1] * fr;
     }
 
     float process(float in, float ratio)
@@ -88,11 +37,11 @@ struct PitchShifter
     }
 };
 
-class SakuraParadiseAudioProcessor : public juce::AudioProcessor
+class SakuraHellAudioProcessor : public juce::AudioProcessor
 {
 public:
-    SakuraParadiseAudioProcessor();
-    ~SakuraParadiseAudioProcessor() override = default;
+    SakuraHellAudioProcessor();
+    ~SakuraHellAudioProcessor() override = default;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -102,10 +51,10 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return "SakuraParadise"; }
+    const juce::String getName() const override { return "SakuraHell"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
-    double getTailLengthSeconds() const override { return 8.0; }
+    double getTailLengthSeconds() const override { return 3.0; }
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -117,33 +66,32 @@ public:
     void setStateInformation(const void*, int) override;
 
     juce::AudioProcessorValueTreeState apvts;
-    std::atomic<float> level { 0.f };
+    std::atomic<float> level { 0.f };   // read by the editor for the mask smile
+    std::atomic<float> detHz { 0.f };   // detected voice pitch (0 = unvoiced)
+    std::atomic<int> targetNote { -1 }; // MIDI note the tuner snaps to (-1 = none)
+    std::atomic<float> tuneCorr { 0.f };// current correction in semitones
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
-    float readChorus(float delaySamples) const;
 
-    static constexpr int bufSize = 16384;
-    static constexpr int bufMask = bufSize - 1;
-
+    PitchShifter shifter[2];
+    float held[2] { 0.f, 0.f };
+    int holdCount[2] { 0, 0 };
+    float ringPhase = 0.f;
     double sr = 44100.0;
-    Biquad hpf[2], lowS[2], highS[2], sibHp[2];
-    float env = 0.f, gate = 1.f, sibEnv = 0.f;
-    float envAtk = 0.f, envRel = 0.f, gateAtk = 0.f, gateRel = 0.f, sibAtk = 0.f, sibRel = 0.f;
-
-    std::vector<float> chBuf, pdBuf;
-    int chW = 0, pdW = 0, pdSamples = 1000;
-    float lfoPh[3] { 0.f, 2.1f, 4.2f };
-    float lfoInc[3] { 0.f, 0.f, 0.f };
-
     juce::Reverb reverb;
-    PitchShifter shifter;
-    float shFb = 0.f;
 
-    // anime voice
-    PitchShifter voice[2];
-    Biquad animeShelf[2];
-    float vibPh = 0.f, vibInc = 0.f;
+    // autotune
+    static constexpr int decN = 512;
+    float dec[decN] {};
+    int decW = 0, decCount = 0, hopCount = 0, decFactor = 4, unvoicedCount = 0;
+    float decAcc = 0.f, corrTarget = 0.f, cs = 0.f, grainTarget = 960.f, tuneGrain = 960.f;
+    unsigned noteMask = 0xFFFu;
+    PitchShifter tuneShifter[2];
+    std::vector<float> ratioBuf, grainBuf;
+    std::atomic<float>* noteParams[12] {};
+    void pushDetect(float mono);
+    void detect();
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SakuraParadiseAudioProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SakuraHellAudioProcessor)
 };
